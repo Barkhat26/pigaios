@@ -24,6 +24,7 @@ from threading import current_thread
 
 import clang.cindex
 from clang.cindex import Diagnostic, CursorKind, TokenKind
+import re
 
 from base_support import *
 from SimpleEval import simple_eval
@@ -430,123 +431,230 @@ class CClangExporter(CBaseExporter):
   def clean_name(self, name):
     return "".join([c for c in name if c.isalpha() or c.isdigit() or c == "_"]).rstrip()
 
-  def get_field(self, element):
-    type_name = element.type.spelling
-    elem_name = self.clean_name(element.spelling)
+  def parse_bitfield(self, field):
+    elem_name = field.spelling
+    type_name = field.type.spelling
+    bit_size = list(list(field.get_children())[0].get_tokens())[0].spelling
+    return type_name, elem_name, bit_size
 
-    kind = self.element2kind(element)
-    is_anon = type_name.find("(anonymous ") > -1
-    if is_anon:
-      type_name = kind
+  def is_array(self, field):
+    type_name = field.type.spelling
+    if re.findall(r'\[[A-Za-z0-9]*\]', type_name):
+      return True
+    else:
+      return False
 
-    ret = []
-    ret.append(type_name)
-    if elem_name == "" and not elem_name.startswith(kind) and not is_anon:
-      ret.insert(0, self.element2kind(element))
+  def is_primitive_field(self, field):
+    # For such cases as PACKED_ATTR, UNEXPOSED_ATTR and etc
+    if not field.kind == CursorKind.FIELD_DECL:
+      return False
 
-    children = list(element.get_children())
-    if len(children) > 0: ret.append("{")
-    for field in children:
-      if field.kind == CursorKind.FIELD_DECL:
-        field_name = field.spelling
-        type_name  = field.type.spelling
-        if type_name.find("(anonymous ") > -1:
-          type_name = ""
+    children = list(field.get_children())
+    if children:
+      kinds = set(map(lambda x: x.kind, children))
+      if kinds & set((CursorKind.STRUCT_DECL, CursorKind.UNION_DECL)):
+        return False
 
-        pos = type_name.find("[")
-        if pos > -1:
-          ret.append(type_name[:pos] + field_name + type_name[pos:] + ";")
-        else:
-          ret.append("%s %s;" % (type_name, field_name))
+    return True
+
+  def is_struct(self, field):
+    if field.kind == CursorKind.STRUCT_DECL:
+      return True
+
+    children = list(field.get_children())
+    if children:
+      if children[0].kind == CursorKind.STRUCT_DECL:
+        return True
+
+    return False
+
+  def is_union(self, field):
+    if field.kind == CursorKind.UNION_DECL:
+      return True
+
+    children = list(field.get_children())
+    if children:
+      if children[0].kind == CursorKind.UNION_DECL:
+        return True
+
+    return False
+
+  def parse_field(self, field):
+    field_name = field.spelling
+    type_name = field.type.spelling
+
+    if self.is_primitive_field(field):
+
+      if field.kind == CursorKind.PACKED_ATTR:
+        return None
+
+      if field.is_bitfield():
+        bit_length = list(list(field.get_children())[0].get_tokens())[0].spelling
+        field_src = "%s %s: %s;" % (type_name, field_name, bit_length)
+        return field_name, field_src
+
+      elif self.is_array(field):
+        pos = type_name.find('[')
+        field_src = type_name[:pos] + field_name + type_name[pos:] + ";"
+        return field_name, field_src
+
+      elif re.findall(r'\(\*+\)', type_name):
+        pos = type_name.find(')(')
+        field_src = (type_name[:pos] + " %s " + type_name[pos:] + ";") % field_name
+        return field_name, field_src
+
       else:
-        name, src = self.get_field(field)
-        ret.append(src)
+        field_src = "%s %s;" % (type_name, field_name)
+        return field_name, field_src
 
-    if len(children) > 0:
-      ret.append("}")
 
-    if not is_anon:
-      ret.append(";")
-
-    ret = "\n".join(ret)
-    return elem_name, ret
-
-  def parse_struct(self, element):
-    children = list(element.get_children())
-    struct_name = element.spelling
-    if struct_name is None or struct_name == "":
-      struct_name = element.type.spelling
-
-    is_forward = len(children) == 0
-    if is_forward:
-      return struct_name, "struct %s;" % struct_name
-
-    tokens = list(element.get_tokens())
-    struct_src = []
-    for tkn in tokens:
-      if tkn.kind is not TokenKind.COMMENT:
-        struct_src.append(tkn.spelling)
-        if tkn.kind is TokenKind.PUNCTUATION and \
-           tkn.spelling in [";", "}"]:
-          struct_src[len(struct_src)-1] += "\n"
-
-    if struct_src[0] == "struct" and struct_src[1] in ["{", "{\n"]:
-      struct_src.insert(1, struct_name)
-
-    struct_src.append(";")
-    return struct_name, " ".join(struct_src)
-
-  def parse_typedef(self, element):
-    src = None
-    typedef_name = element.spelling
-    if typedef_name is not None:
-      typename = element.underlying_typedef_type.spelling
-      if typename is not None and typename != "":
-        func_pointer_str = " (*)("
-        pos = typename.find(func_pointer_str)
-        if pos == -1 :
-          src = "typedef %s %s;" % (typename, typedef_name)
+    elif self.is_struct(field):
+        if field.kind == CursorKind.FIELD_DECL:
+          struct = list(field.get_children())[0]
+          struct_name, struct_src = self.parse_struct(struct, is_nested=True)
         else:
-          tmp = "typedef " + typename[:pos] + " (*%s)(" % typedef_name + typename[pos+len(func_pointer_str):] + ";"
-          src = tmp
+          struct = self.parse_struct(field, is_nested=False)
+          if not struct:
+            return None
+          struct_name, struct_src = struct
 
-    return typedef_name, src
+        if self.is_array(field):
+          pos = type_name.find('[')
+          struct_src = "%s %s%s;" % (struct_src, field.spelling, type_name[pos:])
+        else:
+          struct_src = "%s %s;" % (struct_src, field.spelling)
+        return field.spelling, struct_src
+    elif self.is_union(field):
+        if field.kind == CursorKind.FIELD_DECL:
+          union = list(field.get_children())[0]
+          union_name, union_src = self.parse_union(union, is_nested=True)
+        else:
+          union = self.parse_union(field, is_nested=True)
+          if not union:
+            return None
+          union_name, union_src = union
+
+        if self.is_array(field):
+          pos = type_name.find('[')
+          union_src = "%s %s%s;" % (union_src, field.spelling, type_name[pos:])
+        else:
+         union_src = "%s %s;" % (union_src, field.spelling)
+        return field.spelling, union_src
+    else:
+      return None
+
+
+
+  def parse_union(self, union, is_nested=False):
+    is_anon = ("(anonymous " in union.type.spelling) or (union.spelling == "")
+    if is_anon and not is_nested:
+      return None
+
+    union_name = union.spelling
+    union_src = ["union %s" % union_name, "{"]
+
+    for field in union.get_children():
+      field_pair = self.parse_field(field)
+      if not field_pair:
+        continue
+      field_name, field_src = field_pair
+      union_src.append(field_src)
+
+    if is_anon:
+      union_src.append("}")
+    else:
+      union_src.append("};")
+
+    union_src = '\n'.join(union_src)
+    return union_name, union_src
+
+  def parse_struct(self, struct, is_nested=False):
+    is_anon = ("(anonymous " in struct.type.spelling) or (struct.spelling =="");
+    if is_anon and not is_nested:
+      return None
+
+    struct_name = struct.spelling
+    struct_src = ["struct %s" % struct_name, "{"]
+
+    for field in struct.get_children():
+      field_pair = self.parse_field(field)
+      if not field_pair:
+        continue
+      field_name, field_src = field_pair
+      struct_src.append(field_src)
+
+    if is_anon:
+      struct_src.append("}")
+    else:
+      struct_src.append("};")
+
+    struct_src = '\n'.join(struct_src)
+    return struct_name, struct_src
+
+  def parse_typedef(self, typedef):
+    typedef_name = typedef.spelling
+    underlying_typename = typedef.underlying_typedef_type.spelling
+
+    if '(anonymous struct' in underlying_typename or underlying_typename.startswith('struct'):
+      child = list(typedef.get_children())[0]
+      if child.kind == CursorKind.STRUCT_DECL and child.spelling == '':
+        struct = child
+        struct_name, struct_src = self.parse_struct(struct, is_nested=True)
+        typedef_src = "typedef %s %s;" % (struct_src, typedef.spelling)
+      elif child.kind == CursorKind.TYPE_REF:
+        typedef_src = "typedef %s %s;" % (underlying_typename, typedef.spelling)
+      else:
+        return None
+    elif '(anonymous union' in underlying_typename or underlying_typename.startswith('union'):
+      child = list(typedef.get_children())[0]
+      if child.kind == CursorKind.UNION_DECL and child.spelling == '':
+        union = child
+        union_name, union_src = self.parse_union(union, is_nested=True)
+        typedef_src = "typedef %s %s;" % (union_src, typedef.spelling)
+      elif child.kind == CursorKind.TYPE_REF:
+        typedef_src = "typedef %s %s;" % (underlying_typename, typedef.spelling)
+      else:
+        return None
+    else:
+      # For case "typedef int (*bar)(int *, void*);"
+      if re.findall(r'\(\*+\)', underlying_typename):
+        pos = underlying_typename.find(')(')
+        src = ("typedef " + underlying_typename[:pos] + " %s " + underlying_typename[pos:] + ";") % typedef_name
+        return typedef_name, src
+
+      # For case "typedef int foo(int *, void *);"
+      pos = underlying_typename.find('(')
+      if pos > -1:
+        src = ("typedef " + underlying_typename[:pos-1] + " %s " + underlying_typename[pos:] + ";") % typedef_name
+        return typedef_name, src
+
+      typedef_src = "typedef %s %s;" % (underlying_typename, typedef.spelling)
+
+
+    return typedef_name, typedef_src
+
+  def get_enum_constant_value(self, element):
+    tokens = map(lambda x: x.spelling, list(element.get_tokens()))
+    return ' '.join(tokens)
 
   def parse_enum(self, enum):
-    is_anon = enum.type.spelling.find("(anonymous ") > -1
-    if not is_anon:
-      enum_name = enum.type.spelling
-    else:
-      enum_name = ""
+    enum_name = enum.spelling
 
-    if not enum_name.startswith("enum "):
-      line = "enum %s {" % enum_name
-    else:
-      line = "%s {" % enum_name
-    ret = [line]
-    for kid in enum.get_children():
-      children = kid.get_children()
-      next_kid = next(children, None)
-      token = None
-      if next_kid is not None:
-        tokens_list = next_kid.get_tokens()
-        token = next(tokens_list, None)
-        if token is not None:
-          tkn = token.spelling
-          if token.kind == TokenKind.PUNCTUATION:
-            token = next(tokens_list, None)
-            tkn += token.spelling
-          token = tkn
+    ret = ["enum " + enum_name + " {"]
 
-      if token is None:
-        ret.append("%s," % kid.spelling)
-      else:
-        ret.append("%s = %s," % (kid.spelling, str(token)))
+    for enum_constant in enum.get_children():
+      label = enum_constant.spelling
+      children = list(enum_constant.get_children())
+      if not children:
+        ret.append("%s," % label)
+        continue
 
-    last = len(ret)-1
-    ret[last] = ret[last].strip(",")
+      value_cursor = children[0]
+      value = self.get_enum_constant_value(value_cursor)
+      ret.append("%s = %s," % (label, value))
+
     ret.append("};")
-    enum_src = "\n".join(ret)
+    enum_src = '\n'.join(ret)
     return enum_name, enum_src
 
   def export_one(self, filename, args, is_c):
@@ -601,18 +709,32 @@ class CClangExporter(CBaseExporter):
               dones.add(fileobj.name)
 
             if element.kind == CursorKind.STRUCT_DECL:
-              struct_name, struct_src = self.get_field(element)
-              if not struct_src.startswith("struct "):
-                struct_src = "struct %s" % struct_src
+              struct = self.parse_struct(element)
+
+              if not struct:
+                continue
+
+              struct_name, struct_src = struct
               self.src_definitions.append(["struct", struct_name, struct_src])
+            elif element.kind == CursorKind.UNION_DECL:
+              union = self.parse_union(element)
+
+              if not union:
+                continue
+
+              union_name, union_src = union
+              self.src_definitions.append(["union", union_name, union_src])
             elif element.kind == CursorKind.ENUM_DECL:
-              ret = self.get_field(element)
               enum_name, enum_src = self.parse_enum(element)
               self.src_definitions.append(["enum", enum_name, enum_src])
             elif element.kind == CursorKind.TYPEDEF_DECL:
-              typedef_name, typedef_src = self.parse_typedef(element)
-              if typedef_name is not None and typedef_src is not None:
-                self.src_definitions.append(["typedef", typedef_name, typedef_src])
+              typedef = self.parse_typedef(element)
+
+              if not typedef:
+                continue
+
+              typedef_name, typedef_src = typedef
+              self.src_definitions.append(["typedef", typedef_name, typedef_src])
 
           if fileobj.name != filename:
             continue

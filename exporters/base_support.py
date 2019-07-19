@@ -84,6 +84,14 @@ def is_c_source(arg):
   return arg.endswith(".c")
 
 #-------------------------------------------------------------------------------
+def is_export_header(arg, config):
+  export_header = config.get('PROJECT', 'export-header')
+  if arg == export_header:
+    return True
+  else:
+    return False
+
+#-------------------------------------------------------------------------------
 # Ripped out from REgoogle
 def constant_filter(value):
   """Filter for certain constants/immediate values. Not all values should be
@@ -389,7 +397,8 @@ class CBaseExporter(object):
         sql = tmp_sql
         args.append(arg)
 
-      cur.executemany(sql, args)
+      if sql is not None:
+        cur.executemany(sql, args)
 
       self.header_files = list(self.header_files)
       self.src_definitions = list(self.src_definitions)

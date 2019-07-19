@@ -25,7 +25,7 @@ import sys
 import popen2
 import ConfigParser
 
-from exporters.base_support import is_source_file, is_header_file
+from exporters.base_support import is_source_file, is_header_file, is_export_header
 
 try:
   from colorama import colorama_text, Style, init
@@ -58,8 +58,11 @@ class CSBDProject:
 
   def create_project(self, path, project_file):
     if os.path.exists(project_file):
-      print("Project file %s already exists." % repr(project_file))
-      return False
+      answer = None
+      while answer not in ('', 'y', 'n', 'yes', 'no'):
+        answer = raw_input("Project file %s already exists. Rewrite ([y]/n)?" % repr(project_file))
+      if answer == 'n':
+        return False
 
     config = ConfigParser.RawConfigParser()
     config.optionxform = str
@@ -79,8 +82,8 @@ class CSBDProject:
     base_path = os.path.basename(path)
     path = os.path.relpath(path)
     path = path.replace("\\", "/")
-    config.set(section, "cflags", "-I%s -I%s/include" % (path, path))
-    config.set(section, "cxxflags", "-I%s -I%s/include" % (path, path))
+    config.set(section, "cflags", "-I%s -I%s/include -xc" % (path, path))
+    config.set(section, "cxxflags", "-I%s -I%s/include -xc++" % (path, path))
     config.set(section, "export-file", "%s.sqlite" % base_path)
     config.set(section, "export-header", "%s-exported.h" % base_path)
     config.set(section, "export-indent", "clang-format -i")
@@ -90,7 +93,8 @@ class CSBDProject:
     config.add_section(section)
     for root, dirs, files in os.walk(path, topdown=False):
       for name in files:
-        if is_source_file(name) or (self.analyze_headers and is_header_file(name)):
+        if is_source_file(name) or \
+          (self.analyze_headers and is_header_file(name) and not is_export_header(name, config)):
           filename = os.path.relpath(os.path.join(root, name))
           if filename.find(" ") > -1:
             filename = '"%s"' % filename
@@ -159,7 +163,7 @@ def main():
   use_clang = True
   project_file = DEFAULT_PROJECT_FILE
   next_project_name = False
-  parallel = True
+  parallel = False
   analyze_headers = False
 
   for arg in sys.argv[1:]:
