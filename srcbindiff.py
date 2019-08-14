@@ -23,7 +23,9 @@ from __future__ import print_function
 import os
 import sys
 import popen2
-import ConfigParser
+import json
+import subprocess
+from collections import OrderedDict
 
 from exporters.base_support import is_source_file, is_header_file, is_export_header
 
@@ -44,7 +46,7 @@ except ImportError:
 SBD_BANNER = """Source To Binary Differ command line tool version 0.0.1
 Copyright (c) 2018, Joxean Koret"""
 SBD_PROJECT_COMMENT = "# Default Source-Binary-Differ project configuration"
-DEFAULT_PROJECT_FILE = "sbd.project"
+DEFAULT_PROJECT_FILE = "sbd-project.json"
 
 #-------------------------------------------------------------------------------
 class CSBDProject:
@@ -52,9 +54,28 @@ class CSBDProject:
     self.analyze_headers = False
 
   def resolve_clang_includes(self):
-    cmd = "clang -print-file-name=include"
-    rfd, wfd = popen2.popen2(cmd)
-    return rfd.read().strip("\n")
+    cmd = 'echo | clang -E -Wp,-v -'
+    proc = subprocess.Popen(cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stdout = proc.stdout.read()
+
+    stdout = stdout.decode()
+
+    lines = stdout.split('\n')
+    begin = False
+    includes = []
+
+    for l in lines:
+      if l == '#include <...> search starts here:':
+        begin = True
+        continue
+
+      if l == 'End of search list.':
+        break
+
+      if begin:
+        includes.append(l.strip())
+
+    return includes
 
   def create_project(self, path, project_file):
     if os.path.exists(project_file):
@@ -64,47 +85,45 @@ class CSBDProject:
       if answer == 'n':
         return False
 
-    config = ConfigParser.RawConfigParser()
-    config.optionxform = str
+    config = OrderedDict()
 
     # Add the CLang specific configuration section
-    section = "GENERAL"
-    config.add_section(section)
-    clang_includes = self.resolve_clang_includes()
-    if clang_includes.find(" ") > -1:
-      clang_includes = '"%s"' % clang_includes
-    config.set(section, "includes", clang_includes)
-    config.set(section, "inlines", 0)
+    config['GENERAL'] = {
+      'clang-includes': self.resolve_clang_includes(),
+      'inlines': 0,
+    }
+    config['GENERAL'] = OrderedDict(sorted(config['GENERAL'].items(), key=lambda x: x[0]))
 
     # Add the project specific configuration section
-    section = "PROJECT"
-    config.add_section(section)
     base_path = os.path.basename(path)
-    path = os.path.relpath(path)
-    path = path.replace("\\", "/")
-    config.set(section, "cflags", "-I%s -I%s/include -xc" % (path, path))
-    config.set(section, "cxxflags", "-I%s -I%s/include -xc++" % (path, path))
-    config.set(section, "export-file", "%s.sqlite" % base_path)
-    config.set(section, "export-header", "%s-exported.h" % base_path)
-    config.set(section, "export-indent", "clang-format -i")
+    config['PROJECT'] = {
+      "cflags": " -xc",
+      "cxxflags": "-xc++",
+      "export-file": "%s.sqlite" % base_path,
+      "export-header": "%s-exported.h" % base_path,
+      "export-indent": "clang-format -i",
+    }
+    config['PROJECT'] = OrderedDict(sorted(config['PROJECT'].items(), key=lambda x: x[0]))
 
     # And now add all discovered source files
-    section = "FILES"
-    config.add_section(section)
-    for root, dirs, files in os.walk(path, topdown=False):
-      for name in files:
-        if is_source_file(name) or \
-          (self.analyze_headers and is_header_file(name) and not is_export_header(name, config)):
-          filename = os.path.relpath(os.path.join(root, name))
-          if filename.find(" ") > -1:
-            filename = '"%s"' % filename
-          config.set(section, filename, "1")
+    with open('./compile_commands.json') as f:
+      compile_commands = json.load(f)
 
-    with open(project_file, "wb") as configfile:
-      configfile.write("#"*len(SBD_PROJECT_COMMENT) + "\n")
-      configfile.write(SBD_PROJECT_COMMENT + "\n")
-      configfile.write("#"*len(SBD_PROJECT_COMMENT) + "\n")
-      config.write(configfile)
+    files_to_clfags = {}
+
+    for cc in compile_commands:
+      filename = cc['file']
+      if not filename.endswith('.c') or filename.endswith('.h') \
+          or filename.endswith('.cpp') or filename.endswith('.hpp'):
+        continue
+
+      args_filtered = [arg for arg in cc['arguments'] if arg.startswith('-I') or arg.startswith('-D')]
+      files_to_clfags[filename] = args_filtered
+
+    config['FILES'] = OrderedDict(sorted(files_to_clfags.items(), key=lambda x: x[0]))
+
+    with open(project_file, 'w') as f:
+      json.dump(config, f, indent=4)
 
     return True
 

@@ -25,7 +25,8 @@ import json
 import shlex
 import sqlite3
 import itertools
-import ConfigParser
+from collections import OrderedDict
+import progressbar
 
 from threading import current_thread
 from terminalsize import get_terminal_size
@@ -85,7 +86,7 @@ def is_c_source(arg):
 
 #-------------------------------------------------------------------------------
 def is_export_header(arg, config):
-  export_header = config.get('PROJECT', 'export-header')
+  export_header = config.get['PROJECT']['export-header']
   if arg == export_header:
     return True
   else:
@@ -219,11 +220,12 @@ copy_reg.pickle(types.MethodType, _pickle_method, _unpickle_method)
 class CBaseExporter(object):
   def __init__(self, cfg_file):
     self.cfg_file = cfg_file
-    self.config = ConfigParser.ConfigParser()
-    self.config.optionxform = str
-    self.config.read(cfg_file)
+
+    with open(cfg_file) as f:
+      self.config = json.load(f)
+
     self.db = {}
-    self.create_schema(self.config.get('PROJECT', 'export-file'), remove = True)
+    self.create_schema(self.config['PROJECT']['export-file'], remove=True)
     self.parallel = False
 
     self.warnings = 0
@@ -344,35 +346,35 @@ class CBaseExporter(object):
       self.fatals += 1
 
   def export_parallel(self):
-    c_args = ["-I%s" % self.config.get('GENERAL', 'includes')]
+    c_args = ["-I%s" % ci for ci in self.config['GENERAL']['clang-includes']]
     cpp_args = list(c_args)
-    tmp = self.config.get('PROJECT', 'cflags')
+    tmp = self.config['PROJECT'].get('cflags')
     if tmp != "":
       c_args.extend(shlex.split(tmp))
 
-    tmp = self.config.get('PROJECT', 'cxxflags')
+    tmp = self.config['PROJECT'].get('cxxflags')
     if tmp != "":
       cpp_args.extend(shlex.split(tmp))
 
     pool_args = []
-    section = "FILES"
-    for item in self.config.items(section):
-      filename, enabled = item
-      if enabled:
-        if is_c_source(filename):
-          args = c_args
-          msg = "[+] CC %s %s" % (filename, " ".join(args))
-          is_c = 1
-        elif is_objc_source(filename):
-          args = c_args
-          msg = "[+] OBJC %s %s" % (filename, " ".join(args))
-          is_c = 2
-        else:
-          args = cpp_args
-          msg = "[+] CXX %s %s" % (filename, " ".join(args))
-          is_c = 0
+    files_to_args = OrderedDict(sorted(self.config['FILES'].items(), key=lambda x: x[0]))
+    files_count = len(files_to_args)
+    for idx, item in enumerate(files_to_args.items()):
+      filename, file_args = item
+      if is_c_source(filename):
+        args = file_args + c_args
+        msg = "[{}/{}] CC {} {}".format(idx + 1, files_count, filename, " ".join(args))
+        is_c = 1
+      elif is_objc_source(filename):
+        args = file_args + c_args
+        msg = "[{}/{}] OBJC {} {}".format(idx + 1, files_count, filename, " ".join(args))
+        is_c = 2
+      else:
+        args = file_args + cpp_args
+        msg = "[{}/{}] CXX {} {}".format(idx + 1, files_count, filename, " ".join(args))
+        is_c = 0
 
-        pool_args.append((filename, args, is_c,))
+      pool_args.append((filename, args, is_c,))
 
     total_cpus = cpu_count()
     export_log("Using a total of %d thread(s)" % total_cpus)
@@ -610,7 +612,7 @@ class CBaseExporter(object):
     export_log("[+] Building definitions...")
 
     try:
-      file_header = self.config.get('PROJECT', 'export-header')
+      file_header = self.config['PROJECT']['export-header']
       f = open(file_header, "wb")
       f.write("//" + "-"*80 + "\n")
       f.write("// Header automatically created by Pigaios on %s\n" % time.asctime())
@@ -648,7 +650,7 @@ class CBaseExporter(object):
       f.close()
       
       try:
-        indent = self.config.get('PROJECT', 'export-indent')
+        indent = self.config['PROJECT']['export-indent']
         os.system("%s %s" % (indent, file_header))
       except:
         pass
@@ -659,7 +661,7 @@ class CBaseExporter(object):
     self.build_callgraphs(cur)
     self.build_constants_list(cur)
     try:
-      if int(self.config.get('GENERAL', 'inlines')) == 1:
+      if self.config['GENERAL']['inlines'] == 1:
         self.build_inlines(cur)
     except:
       print("Error:", str(sys.exc_info()[1]))
@@ -668,38 +670,38 @@ class CBaseExporter(object):
     cur.close()
 
   def export(self):
-    c_args = ["-I%s" % self.config.get('GENERAL', 'includes')]
+    c_args = ["-I%s" % ci for ci in self.config['GENERAL']['clang-includes']]
     cpp_args = list(c_args)
-    tmp = self.config.get('PROJECT', 'cflags')
+    tmp = self.config['PROJECT'].get('cflags')
     if tmp != "":
       c_args.extend(shlex.split(tmp))
 
-    tmp = self.config.get('PROJECT', 'cxxflags')
+    tmp = self.config['PROJECT'].get('cxxflags')
     if tmp != "":
       cpp_args.extend(shlex.split(tmp))
 
-    section = "FILES"
-    for item in self.config.items(section):
-      filename, enabled = item
-      if enabled:
-        if is_c_source(filename):
-          args = c_args
-          msg = "[+] CC %s %s" % (filename, " ".join(args))
-          is_c = True
-        else:
-          args = cpp_args
-          msg = "[+] CXX %s %s" % (filename, " ".join(args))
-          is_c = False
+    files_to_args = OrderedDict(sorted(self.config['FILES'].items(), key=lambda x: x[0]))
+    files_count = len(files_to_args)
+    for idx, item in enumerate(files_to_args.items()):
+      filename, file_args = item
+      if is_c_source(filename):
+        args = file_args + c_args
+        msg = "[{}/{}] CC {} {}".format(idx + 1, files_count, filename, " ".join(args))
+        is_c = True
+      else:
+        args = file_args + cpp_args
+        msg = "[{}/{}] CXX {} {}".format(idx + 1, files_count, filename, " ".join(args))
+        is_c = False
 
+      export_log(msg)
+      try:
+        self.export_one(filename, args, is_c)
+      except KeyboardInterrupt:
+        raise
+      except:
+        msg = "%s: fatal: %s" % (filename, str(sys.exc_info()[1]))
         export_log(msg)
-        try:
-          self.export_one(filename, args, is_c)
-        except KeyboardInterrupt:
-          raise
-        except:
-          msg = "%s: fatal: %s" % (filename, str(sys.exc_info()[1]))
-          export_log(msg)
-          self.fatals += 1
+        self.fatals += 1
 
     self.final_steps()
 
