@@ -372,13 +372,14 @@ class CLangParser:
 
 #-------------------------------------------------------------------------------
 class CClangExporter(CBaseExporter):
-  def __init__(self, cfg_file):
+  def __init__(self, cfg_file, only_header_els):
     CBaseExporter.__init__(self, cfg_file)
     self.source_cache = {}
     self.global_variables = set()
 
     self.header_files = []
     self.src_definitions = []
+    self.only_header_els = only_header_els
 
   def get_function_source(self, cursor):
     start_line = cursor.extent.start.line
@@ -698,46 +699,36 @@ class CClangExporter(CBaseExporter):
 
       dones = set()
       for element in parser.tu.cursor.get_children():
-        fileobj = element.location.file
-        if fileobj is not None:
-          pathname = os.path.realpath(os.path.dirname(fileobj.name))
-          if not pathname.startswith(cwd):
+        if element.kind == CursorKind.STRUCT_DECL:
+          struct = self.parse_struct(element)
+
+          if not struct:
             continue
 
-          if fileobj.name not in self.header_files:
-            if fileobj.name not in dones:
-              dones.add(fileobj.name)
+          struct_name, struct_src = struct
+          self.src_definitions.append(["struct", struct_name, struct_src])
+        elif element.kind == CursorKind.UNION_DECL:
+          union = self.parse_union(element)
 
-            if element.kind == CursorKind.STRUCT_DECL:
-              struct = self.parse_struct(element)
-
-              if not struct:
-                continue
-
-              struct_name, struct_src = struct
-              self.src_definitions.append(["struct", struct_name, struct_src])
-            elif element.kind == CursorKind.UNION_DECL:
-              union = self.parse_union(element)
-
-              if not union:
-                continue
-
-              union_name, union_src = union
-              self.src_definitions.append(["union", union_name, union_src])
-            elif element.kind == CursorKind.ENUM_DECL:
-              enum_name, enum_src = self.parse_enum(element)
-              self.src_definitions.append(["enum", enum_name, enum_src])
-            elif element.kind == CursorKind.TYPEDEF_DECL:
-              typedef = self.parse_typedef(element)
-
-              if not typedef:
-                continue
-
-              typedef_name, typedef_src = typedef
-              self.src_definitions.append(["typedef", typedef_name, typedef_src])
-
-          if fileobj.name != filename:
+          if not union:
             continue
+
+          union_name, union_src = union
+          self.src_definitions.append(["union", union_name, union_src])
+        elif element.kind == CursorKind.ENUM_DECL:
+          enum_name, enum_src = self.parse_enum(element)
+          self.src_definitions.append(["enum", enum_name, enum_src])
+        elif element.kind == CursorKind.TYPEDEF_DECL:
+          typedef = self.parse_typedef(element)
+
+          if not typedef:
+            continue
+
+          typedef_name, typedef_src = typedef
+          self.src_definitions.append(["typedef", typedef_name, typedef_src])
+
+        if self.only_header_els:
+          continue
 
         if element.kind == CursorKind.VAR_DECL:
           name = element.spelling
@@ -782,6 +773,5 @@ class CClangExporter(CBaseExporter):
                   obj.is_static, basename(filename).lower(), )
           self.insert_row(sql, args, cur)
 
-      self.header_files += list(dones)
       if not self.parallel:
         cur.execute("COMMIT")

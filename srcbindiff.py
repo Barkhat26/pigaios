@@ -49,12 +49,12 @@ except ImportError:
 SBD_BANNER = """Source To Binary Differ command line tool version 0.0.1
 Copyright (c) 2018, Joxean Koret"""
 SBD_PROJECT_COMMENT = "# Default Source-Binary-Differ project configuration"
-DEFAULT_PROJECT_FILE = os.path.join('__pigaios__', 'sbd-project.json')
+PROJECT_PIGAIOS_DIR = '__pigaios__'
+DEFAULT_PROJECT_FILE = os.path.join(PROJECT_PIGAIOS_DIR, 'sbd-project.json')
 
 #-------------------------------------------------------------------------------
 class CSBDProject:
   def __init__(self, build_system=None):
-    self.analyze_headers = False
     self.build_system = build_system
 
   def resolve_clang_includes(self):
@@ -103,8 +103,8 @@ class CSBDProject:
     config['PROJECT'] = {
       "cflags": " -xc",
       "cxxflags": "-xc++",
-      "export-file": "%s.sqlite" % base_path,
-      "export-header": "%s-exported.h" % base_path,
+      "export-file": "{}.sqlite".format(os.path.join(PROJECT_PIGAIOS_DIR, base_path)),
+      "export-header": "{}-exported.h".format(os.path.join(PROJECT_PIGAIOS_DIR, base_path)),
       "export-indent": "clang-format -i",
     }
     config['PROJECT'] = OrderedDict(sorted(config['PROJECT'].items(), key=lambda x: x[0]))
@@ -126,15 +126,15 @@ class CSBDProject:
 
 #-------------------------------------------------------------------------------
 class CSBDExporter:
-  def __init__(self, cfg_file, parallel = False):
+  def __init__(self, cfg_file, parallel=False):
     self.cfg_file = cfg_file
     self.parallel = parallel
 
-  def export(self, use_clang):
+  def export(self, use_clang, only_header_els):
     exporter = None
     if not has_clang:
       raise Exception("Python CLang bindings aren't installed!")
-    exporter = clang_exporter.CClangExporter(self.cfg_file)
+    exporter = clang_exporter.CClangExporter(self.cfg_file, only_header_els)
     exporter.parallel = self.parallel
 
     try:
@@ -153,11 +153,12 @@ class CSBDExporter:
 
 #-------------------------------------------------------------------------------
 def main():
-  analyze_headers = False
-
   parser = argparse.ArgumentParser(description=SBD_BANNER)
   parser.add_argument('-create', help='Create a project in the current directory and discover source files.',
                       action='store_true')
+  parser.add_argument('--build-system', help='Specify build system that is used for project. '
+                                             'Available build systems: Makefile',
+                      dest='build_system', default=None)
   parser.add_argument('-export', help='Export the current project to one SQLite database.', action='store_true')
   parser.add_argument('-project', help='Use <file> as the project filename.',
                       dest="project_file", default=DEFAULT_PROJECT_FILE)
@@ -167,23 +168,26 @@ def main():
                       action='store_true', dest="parallel", default=False)
   parser.add_argument('-p', '--profile-export', help='Execute the command and show profiling data.',
                       action='store_true', dest='profiling')
-  parser.add_argument('--analyze-headers', help='Analyze also all the header files.', action='store_true')
+  parser.add_argument('--only-header-els',
+                      help='Analyze only header elements such as typedef, structs, unions, #define and etc.'
+                      '*-exported.h file will be created. sqlite file will be created too, but without functions'
+                      'data needed for IDA script matching',
+                      action='store_true', dest='only_header_els', default=False)
   parser.add_argument('-test', help='Test for the availability of exporters', action='store_true')
   args = parser.parse_args()
 
   if args.create:
-    sbd_project = CSBDProject()
-    sbd_project.analyze_headers = analyze_headers
+    sbd_project = CSBDProject(args.build_system)
     if sbd_project.create_project(os.getcwd(), args.project_file):
       print("Project file %s created." % repr(args.project_file))
   elif args.export:
     exporter = CSBDExporter(args.project_file, args.parallel)
-    exporter.export(args.use_clang)
+    exporter.export(args.use_clang, args.only_header_els)
   elif args.profiling:
     import cProfile
     profiler = cProfile.Profile()
     exporter = CSBDExporter(args.project_file, args.parallel)
-    profiler.runcall(exporter.export, (args.use_clang,))
+    profiler.runcall(exporter.export, (args.use_clang, args.only_header_els,))
     profiler.print_stats(sort="time")
 
 
