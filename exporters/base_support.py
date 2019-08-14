@@ -26,7 +26,6 @@ import shlex
 import sqlite3
 import itertools
 from collections import OrderedDict
-import progressbar
 
 from threading import current_thread
 from terminalsize import get_terminal_size

@@ -22,10 +22,13 @@ from __future__ import print_function
 
 import os
 import sys
-import popen2
 import json
 import subprocess
 from collections import OrderedDict
+import argparse
+from argsgenerators import MakefileArgsGenerator
+from argsgenerators import SimpleArgsGenerator
+
 
 from exporters.base_support import is_source_file, is_header_file, is_export_header
 
@@ -46,12 +49,13 @@ except ImportError:
 SBD_BANNER = """Source To Binary Differ command line tool version 0.0.1
 Copyright (c) 2018, Joxean Koret"""
 SBD_PROJECT_COMMENT = "# Default Source-Binary-Differ project configuration"
-DEFAULT_PROJECT_FILE = "sbd-project.json"
+DEFAULT_PROJECT_FILE = os.path.join('__pigaios__', 'sbd-project.json')
 
 #-------------------------------------------------------------------------------
 class CSBDProject:
-  def __init__(self):
+  def __init__(self, build_system=None):
     self.analyze_headers = False
+    self.build_system = build_system
 
   def resolve_clang_includes(self):
     cmd = 'echo | clang -E -Wp,-v -'
@@ -106,21 +110,14 @@ class CSBDProject:
     config['PROJECT'] = OrderedDict(sorted(config['PROJECT'].items(), key=lambda x: x[0]))
 
     # And now add all discovered source files
-    with open('./compile_commands.json') as f:
-      compile_commands = json.load(f)
+    if self.build_system == 'Makefile':
+      mag = MakefileArgsGenerator(path)
+      file_to_args = mag.generate()
+    else:
+      sag = SimpleArgsGenerator(path)
+      file_to_args = sag.generate()
 
-    files_to_clfags = {}
-
-    for cc in compile_commands:
-      filename = cc['file']
-      if not filename.endswith('.c') or filename.endswith('.h') \
-          or filename.endswith('.cpp') or filename.endswith('.hpp'):
-        continue
-
-      args_filtered = [arg for arg in cc['arguments'] if arg.startswith('-I') or arg.startswith('-D')]
-      files_to_clfags[filename] = args_filtered
-
-    config['FILES'] = OrderedDict(sorted(files_to_clfags.items(), key=lambda x: x[0]))
+    config['FILES'] = file_to_args
 
     with open(project_file, 'w') as f:
       json.dump(config, f, indent=4)
@@ -153,75 +150,42 @@ class CSBDExporter:
       msg = "\n%d warning(s), %d error(s), %d fatal error(s)"
       print(msg % (exporter.warnings, exporter.errors, exporter.fatals))
 
-#-------------------------------------------------------------------------------
-def usage():
-  if has_colorama:
-    with colorama_text():
-      print(Style.BRIGHT + SBD_BANNER + Style.RESET_ALL)
-  else:
-    print(SBD_BANNER)
-
-  print()
-  print("Usage:", sys.argv[0], "<options>")
-  print()
-  print("Options:")
-  print()
-  print("-create            Create a project in the current directory and discover source files.")
-  print("-export            Export the current project to one SQLite database.")
-  print("-project <file>    Use <file> as the project filename.")
-  print("-clang             Use the 'Clang Python bindings' to parse the source files (default).")
-  print("--no-parallel      Do not parallelize the compilation process (faster for small code bases).")
-  print("--profile-export   Execute the command and show profiling data.")
-  print("--analyze-headers  Analyze also all the header files.")
-  print("-test              Test for the availability of exporters")
-  print("-help              Show this help.")
-  print()
 
 #-------------------------------------------------------------------------------
 def main():
-  use_clang = True
-  project_file = DEFAULT_PROJECT_FILE
-  next_project_name = False
-  parallel = False
   analyze_headers = False
 
-  for arg in sys.argv[1:]:
-    if next_project_name:
-      project_file = arg
-      next_project_name = False
-      continue
+  parser = argparse.ArgumentParser(description=SBD_BANNER)
+  parser.add_argument('-create', help='Create a project in the current directory and discover source files.',
+                      action='store_true')
+  parser.add_argument('-export', help='Export the current project to one SQLite database.', action='store_true')
+  parser.add_argument('-project', help='Use <file> as the project filename.',
+                      dest="project_file", default=DEFAULT_PROJECT_FILE)
+  parser.add_argument('-clang', help="Use the Clang Python bindings' to parse the source files (default)",
+                      action='store_true', dest='use_clang', default=True)
+  parser.add_argument('--no-parallel', help='Do not parallelize the compilation process (faster for small code bases).',
+                      action='store_true', dest="parallel", default=False)
+  parser.add_argument('-p', '--profile-export', help='Execute the command and show profiling data.',
+                      action='store_true', dest='profiling')
+  parser.add_argument('--analyze-headers', help='Analyze also all the header files.', action='store_true')
+  parser.add_argument('-test', help='Test for the availability of exporters', action='store_true')
+  args = parser.parse_args()
 
-    if arg in ["-create", "-c"]:
-      sbd_project = CSBDProject()
-      sbd_project.analyze_headers = analyze_headers
-      if sbd_project.create_project(os.getcwd(), project_file):
-        print("Project file %s created." % repr(project_file))
-    elif arg == "-project":
-      next_project_name = True
-    elif arg == "-clang":
-      use_clang = True
-    elif arg in ["-export", "-e"]:
-      exporter = CSBDExporter(project_file, parallel)
-      exporter.export(use_clang)
-    elif arg in ["-p", "--profile-export"]:
-      import cProfile
-      profiler = cProfile.Profile()
-      exporter = CSBDExporter(project_file, parallel)
-      profiler.runcall(exporter.export, (use_clang,))
-      profiler.print_stats(sort="time")
-    elif arg in ["-test", "-t"]:
-      print("Has Clang Python Bindings: %s" % has_clang)
-    elif arg in ["--no-parallel"]:
-      parallel = False
-    elif arg in ["--analyze-headers"]:
-      analyze_headers = True
-    elif arg in ["-help", "-h"]:
-      usage()
-    else:
-      print("Unsupported command line argument %s" % repr(arg))
+  if args.create:
+    sbd_project = CSBDProject()
+    sbd_project.analyze_headers = analyze_headers
+    if sbd_project.create_project(os.getcwd(), args.project_file):
+      print("Project file %s created." % repr(args.project_file))
+  elif args.export:
+    exporter = CSBDExporter(args.project_file, args.parallel)
+    exporter.export(args.use_clang)
+  elif args.profiling:
+    import cProfile
+    profiler = cProfile.Profile()
+    exporter = CSBDExporter(args.project_file, args.parallel)
+    profiler.runcall(exporter.export, (args.use_clang,))
+    profiler.print_stats(sort="time")
+
 
 if __name__ == "__main__":
-  if len(sys.argv) == 1:
-    usage()
-  else:
     main()
